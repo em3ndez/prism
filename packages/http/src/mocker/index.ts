@@ -1,6 +1,7 @@
 import { IPrismComponents, IPrismDiagnostic, IPrismInput } from '@stoplight/prism-core';
 import {
   DiagnosticSeverity,
+  Dictionary,
   IHttpHeaderParam,
   IHttpOperation,
   IHttpOperationResponse,
@@ -9,6 +10,7 @@ import {
 } from '@stoplight/types';
 
 import * as caseless from 'caseless';
+import * as chalk from 'chalk';
 import * as E from 'fp-ts/Either';
 import * as Record from 'fp-ts/Record';
 import { pipe } from 'fp-ts/function';
@@ -17,7 +19,7 @@ import { sequenceT } from 'fp-ts/Apply';
 import * as R from 'fp-ts/Reader';
 import * as O from 'fp-ts/Option';
 import * as RE from 'fp-ts/ReaderEither';
-import { get, groupBy, isNumber, isString, keyBy, mapValues, partial } from 'lodash';
+import { get, groupBy, isNumber, isString, keyBy, mapValues, partial, pick } from 'lodash';
 import { Logger } from 'pino';
 import { is } from 'type-is';
 import {
@@ -30,18 +32,23 @@ import {
   ProblemJsonError,
 } from '../types';
 import withLogger from '../withLogger';
-import { UNAUTHORIZED, UNPROCESSABLE_ENTITY, INVALID_CONTENT_TYPE } from './errors';
-import { generate, generateStatic } from './generator/JSONSchema';
+import { UNAUTHORIZED, UNPROCESSABLE_ENTITY, INVALID_CONTENT_TYPE, SCHEMA_TOO_COMPLEX } from './errors';
+import { generate, generateStatic, SchemaTooComplexGeneratorError } from './generator/JSONSchema';
 import helpers from './negotiator/NegotiatorHelpers';
 import { IHttpNegotiationResult } from './negotiator/types';
 import { runCallback } from './callback/callbacks';
+import { logRequest, logResponse } from '../utils/logger';
+import { JSONSchema } from '../types';
 import {
   decodeUriEntities,
   deserializeFormBody,
   findContentByMediaTypeOrFirst,
   splitUriParams,
+  parseMultipartFormDataParams,
 } from '../validator/validators/body';
+import { parseMIMEHeader } from '../validator/validators/headers';
 import { NonEmptyArray } from 'fp-ts/NonEmptyArray';
+export { resetGenerator as resetJSONSchemaGenerator } from './generator/JSONSchema';
 
 const eitherRecordSequence = Record.sequence(E.Applicative);
 const eitherSequence = sequenceT(E.Apply);
@@ -51,24 +58,30 @@ const mock: IPrismComponents<IHttpOperation, IHttpRequest, IHttpResponse, IHttpM
   input,
   config,
 }) => {
-  const payloadGenerator: PayloadGenerator = config.dynamic
-    ? partial(generate, resource['__bundled__'])
-    : partial(generateStatic, resource);
+  function createPayloadGenerator(config: IHttpOperationConfig, resource: IHttpOperation): PayloadGenerator {
+    return (source: JSONSchema) => {
+      return config.dynamic
+      ? generate(resource, resource['__bundled__'], source, config.seed)
+      : generateStatic(resource, source);
+    };
+  }
+  const payloadGenerator = createPayloadGenerator(config, resource);
 
   return pipe(
     withLogger(logger => {
+      logRequest({ logger, prefix: `${chalk.grey('< ')}`, ...pick(input.data, 'body', 'headers') });
+
       // setting default values
       const acceptMediaType = input.data.headers && caseless(input.data.headers).get('accept');
       if (!config.mediaTypes && acceptMediaType) {
         logger.info(`Request contains an accept header: ${acceptMediaType}`);
         config.mediaTypes = acceptMediaType.split(',');
       }
-
       return config;
     }),
     R.chain(mockConfig => negotiateResponse(mockConfig, input, resource)),
     R.chain(result => negotiateDeprecation(result, resource)),
-    R.chain(result => assembleResponse(result, payloadGenerator)),
+    R.chain(result => assembleResponse(result, payloadGenerator, config.ignoreExamples ?? false)),
     R.chain(
       response =>
         /*  Note: This is now just logging the errors without propagating them back. This might be moved as a first
@@ -77,12 +90,29 @@ const mock: IPrismComponents<IHttpOperation, IHttpRequest, IHttpResponse, IHttpM
         logger =>
           pipe(
             response,
+            E.map(mockResponseLogger(logger)),
             E.map(response => runCallbacks({ resource, request: input.data, response })(logger)),
             E.chain(() => response)
           )
     )
   );
 };
+
+function mockResponseLogger(logger: Logger) {
+  const prefix = chalk.grey('> ');
+
+  return (response: IHttpResponse) => {
+    logger.info(`${prefix}Responding with "${response.statusCode}"`);
+
+    logResponse({
+      logger,
+      prefix,
+      ...pick(response, 'statusCode', 'body', 'headers'),
+    });
+
+    return response;
+  };
+}
 
 function runCallbacks({
   resource,
@@ -100,7 +130,9 @@ function runCallbacks({
         pipe(
           callbacks,
           A.map(callback =>
-            runCallback({ callback, request: parseBodyIfUrlEncoded(request, resource), response })(logger)()
+            runCallback({ callback, request: parseBodyIfUrlEncoded(request, resource), response })(
+              logger.child({ name: 'CALLBACK' })
+            )()
           )
         )
       )
@@ -113,10 +145,11 @@ function runCallbacks({
   we cannot carry parsed informations in case of an error — which is what we do need instead.
 */
 function parseBodyIfUrlEncoded(request: IHttpRequest, resource: IHttpOperation) {
-  const mediaType = caseless(request.headers || {}).get('content-type');
-  if (!mediaType) return request;
+  const contentTypeHeader = caseless(request.headers || {}).get('content-type');
+  if (!contentTypeHeader) return request;
+  const [multipartBoundary, mediaType] = parseMIMEHeader(contentTypeHeader);
 
-  if (!is(mediaType, ['application/x-www-form-urlencoded'])) return request;
+  if (!is(mediaType, ['application/x-www-form-urlencoded', 'multipart/form-data'])) return request;
 
   const specs = pipe(
     O.fromNullable(resource.request),
@@ -125,7 +158,13 @@ function parseBodyIfUrlEncoded(request: IHttpRequest, resource: IHttpOperation) 
     O.getOrElse(() => [] as IMediaTypeContent[])
   );
 
-  const encodedUriParams = splitUriParams(request.body as string);
+  const requestBody = request.body as string;
+  const encodedUriParams = pipe(
+    mediaType === 'multipart/form-data'
+      ? parseMultipartFormDataParams(requestBody, multipartBoundary)
+      : splitUriParams(requestBody),
+    E.getOrElse<IPrismDiagnostic[], Dictionary<string>>(() => ({} as Dictionary<string>))
+  );
 
   if (specs.length < 1) {
     return Object.assign(request, { body: encodedUriParams });
@@ -143,7 +182,7 @@ function parseBodyIfUrlEncoded(request: IHttpRequest, resource: IHttpOperation) 
   if (!content.schema) return Object.assign(request, { body: encodedUriParams });
 
   return Object.assign(request, {
-    body: deserializeFormBody(content.schema, encodings, decodeUriEntities(encodedUriParams)),
+    body: deserializeFormBody(content.schema, encodings, decodeUriEntities(encodedUriParams, mediaType)),
   });
 }
 
@@ -156,7 +195,10 @@ export function createInvalidInputResponse(
   const isExampleKeyFromExpectedCodes = !!mockConfig.code && expectedCodes.includes(mockConfig.code);
 
   return pipe(
-    withLogger(logger => logger.warn({ name: 'VALIDATOR' }, 'Request did not pass the validation rules')),
+    withLogger(logger => {
+      logger.warn({ name: 'VALIDATOR' }, 'Request did not pass the validation rules');
+      failedValidations.map(failedValidation => logger.error({ name: 'VALIDATOR' }, failedValidation.message));
+    }),
     R.chain(() =>
       pipe(
         helpers.negotiateOptionsForInvalidRequest(
@@ -279,7 +321,8 @@ function negotiateDeprecation(
 const assembleResponse =
   (
     result: E.Either<Error, IHttpNegotiationResult>,
-    payloadGenerator: PayloadGenerator
+    payloadGenerator: PayloadGenerator,
+    ignoreExamples: boolean
   ): R.Reader<Logger, E.Either<Error, IHttpResponse>> =>
   logger =>
     pipe(
@@ -287,7 +330,7 @@ const assembleResponse =
       E.bind('negotiationResult', () => result),
       E.bind('mockedData', ({ negotiationResult }) =>
         eitherSequence(
-          computeBody(negotiationResult, payloadGenerator),
+          computeBody(negotiationResult, payloadGenerator, ignoreExamples),
           computeMockedHeaders(negotiationResult.headers || [], payloadGenerator)
         )
       ),
@@ -330,6 +373,7 @@ function computeMockedHeaders(headers: IHttpHeaderParam[], payloadGenerator: Pay
           } else {
             return pipe(
               payloadGenerator(header.schema),
+              mapPayloadGeneratorError('header'),
               E.map(example => {
                 if (isNumber(example) || isString(example)) return example;
                 return null;
@@ -345,15 +389,31 @@ function computeMockedHeaders(headers: IHttpHeaderParam[], payloadGenerator: Pay
 
 function computeBody(
   negotiationResult: Pick<IHttpNegotiationResult, 'schema' | 'mediaType' | 'bodyExample'>,
-  payloadGenerator: PayloadGenerator
+  payloadGenerator: PayloadGenerator,
+  ignoreExamples: boolean
 ): E.Either<Error, unknown> {
-  if (isINodeExample(negotiationResult.bodyExample) && negotiationResult.bodyExample.value !== undefined) {
+  if (
+    !ignoreExamples &&
+    isINodeExample(negotiationResult.bodyExample) &&
+    negotiationResult.bodyExample.value !== undefined
+  ) {
     return E.right(negotiationResult.bodyExample.value);
   }
   if (negotiationResult.schema) {
-    return payloadGenerator(negotiationResult.schema);
+    return pipe(payloadGenerator(negotiationResult.schema), mapPayloadGeneratorError('body'));
   }
   return E.right(undefined);
 }
+
+const mapPayloadGeneratorError = (source: string) =>
+  E.mapLeft<Error, Error>(err => {
+    if (err instanceof SchemaTooComplexGeneratorError) {
+      return ProblemJsonError.fromTemplate(
+        SCHEMA_TOO_COMPLEX,
+        `Unable to generate ${source} for response. The schema is too complex to generate.`
+      );
+    }
+    return err;
+  });
 
 export default mock;

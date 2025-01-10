@@ -13,10 +13,12 @@ export interface IHttpOperationConfig {
   code?: number;
   exampleKey?: string;
   dynamic: boolean;
+  ignoreExamples?: boolean;
+  seed?: string;
 }
 
 export type IHttpMockConfig = Overwrite<IPrismMockConfig, { mock: IHttpOperationConfig }>;
-export type IHttpProxyConfig = IPrismProxyConfig;
+export type IHttpProxyConfig = Overwrite<IPrismProxyConfig, { mock: IHttpOperationConfig }>;
 
 export type IHttpConfig = IHttpProxyConfig | IHttpMockConfig;
 

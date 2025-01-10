@@ -14,6 +14,7 @@ describe('User Http Client', () => {
         errors: false,
         checkSecurity: true,
         upstreamProxy: undefined,
+        isProxy: false,
       };
 
       beforeAll(() => {
@@ -27,11 +28,13 @@ describe('User Http Client', () => {
               path: '/pet',
               servers: [
                 {
+                  id: 'server-1',
                   url: 'https://www.google.it',
                 },
               ],
               responses: [
                 {
+                  id: 'response-1',
                   code: '200',
                 },
               ],

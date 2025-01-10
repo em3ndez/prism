@@ -1,4 +1,4 @@
-import * as operationUtils from '../../operations';
+import * as operationUtils from '@stoplight/prism-http';
 import * as yargs from 'yargs';
 import { createMultiProcessPrism, createSingleProcessPrism } from '../../util/createServer';
 import mockCommand from '../mock';
@@ -31,6 +31,7 @@ describe.each<{ 0: string; 1: string; 2: unknown }>([
         document: '/path/to',
         multiprocess: false,
         errors: false,
+        verboseLevel: 'info',
       })
     );
   });
@@ -54,6 +55,13 @@ describe.each<{ 0: string; 1: string; 2: unknown }>([
 
     expect(createMultiProcessPrism).not.toHaveBeenCalled();
     expect(createSingleProcessPrism).toHaveBeenLastCalledWith(expect.objectContaining({ port: 666, host: '0.0.0.0' }));
+  });
+
+  test(`starts ${command} server with verbose level set to trace`, () => {
+    parser.parse(`${command} /path/to -v trace ${upstream}`);
+
+    expect(createMultiProcessPrism).not.toHaveBeenCalled();
+    expect(createSingleProcessPrism).toHaveBeenLastCalledWith(expect.objectContaining({ verboseLevel: 'trace' }));
   });
 
   test(`starts ${command} server with multiprocess option `, () => {

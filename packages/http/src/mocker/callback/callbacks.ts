@@ -1,7 +1,8 @@
 import { IHttpCallbackOperation, IHttpOperationRequest, Dictionary } from '@stoplight/types';
 import { resolveRuntimeExpressions } from '../../utils/runtimeExpression';
 import { IHttpRequest, IHttpResponse } from '../../types';
-import fetch from 'node-fetch';
+import fetch, { RequestInit } from 'node-fetch';
+import * as chalk from 'chalk';
 import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
 import * as A from 'fp-ts/Array';
@@ -10,10 +11,11 @@ import * as RTE from 'fp-ts/ReaderTaskEither';
 import * as J from 'fp-ts/Json';
 import { head } from 'fp-ts/Array';
 import { pipe } from 'fp-ts/function';
+import { pick } from 'lodash';
 import { generate as generateHttpParam } from '../generator/HttpParamGenerator';
 import { validateOutput } from '../../validator';
 import { parseResponse } from '../../utils/parseResponse';
-import { violationLogger } from '../../utils/logger';
+import { logRequest, logResponse, violationLogger } from '../../utils/logger';
 import { Logger } from 'pino';
 
 export function runCallback({
@@ -29,16 +31,14 @@ export function runCallback({
     const { url, requestData } = assembleRequest({ resource: callback, request, response });
     const logViolation = violationLogger(logger);
 
-    logger.info({ name: 'CALLBACK' }, `${callback.callbackName}: Making request to ${url}...`);
+    logCallbackRequest({ logger, callbackName: callback.key, url, requestData });
 
     return pipe(
       TE.tryCatch(() => fetch(url, requestData), E.toError),
       TE.chain(parseResponse),
-      TE.mapLeft(error =>
-        logger.error({ name: 'CALLBACK' }, `${callback.callbackName}: Request failed: ${error.message}`)
-      ),
+      TE.map(callbackResponseLogger({ logger, callbackName: callback.key })),
+      TE.mapLeft(error => logger.error(`${chalk.blueBright(callback.key + ':')} Request failed: ${error.message}`)),
       TE.chainEitherK(element => {
-        logger.info({ name: 'CALLBACK' }, `${callback.callbackName}: Request finished`);
         return pipe(
           validateOutput({ resource: callback, element }),
           E.mapLeft(violations => {
@@ -47,6 +47,32 @@ export function runCallback({
         );
       })
     );
+  };
+}
+
+function logCallbackRequest({
+  logger,
+  url,
+  callbackName,
+  requestData,
+}: {
+  logger: Logger;
+  callbackName: string;
+  url: string;
+  requestData: Pick<RequestInit, 'headers' | 'method' | 'body'>;
+}) {
+  const prefix = `${chalk.blueBright(callbackName + ':')} ${chalk.grey('> ')}`;
+  logger.info(`${prefix}Executing "${requestData.method}" callback to ${url}...`);
+  logRequest({ logger, prefix, ...pick(requestData, 'body', 'headers') });
+}
+
+function callbackResponseLogger({ logger, callbackName }: { logger: Logger; callbackName: string }) {
+  const prefix = `${chalk.blueBright(callbackName + ':')} ${chalk.grey('< ')}`;
+
+  return (response: IHttpResponse) => {
+    logger.info(`${prefix}Received callback response`);
+    logResponse({ logger, prefix, ...pick(response, 'body', 'headers', 'statusCode') });
+    return response;
   };
 }
 

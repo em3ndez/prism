@@ -1,4 +1,4 @@
-FROM node:12 as compiler
+FROM node:18 AS compiler
 
 WORKDIR /usr/src/prism
 
@@ -8,7 +8,7 @@ COPY packages/ /usr/src/prism/packages/
 RUN yarn && yarn build
 
 ###############################################################
-FROM node:12 as dependencies
+FROM node:18 AS dependencies
 
 WORKDIR /usr/src/prism/
 
@@ -30,11 +30,14 @@ RUN mkdir -p /usr/src/prism/packages/cli/node_modules
 ENV NODE_ENV production
 RUN yarn --production
 
-RUN if [ $(uname -m) != "aarch64" ]; then curl -sfL https://install.goreleaser.com/github.com/tj/node-prune.sh | bash; fi
-RUN if [ $(uname -m) != "aarch64" ]; then ./bin/node-prune; fi
+RUN if [ $(uname -m) != "aarch64" ]; then curl -sfL https://gobinaries.com/tj/node-prune | bash; fi
+RUN if [ $(uname -m) != "aarch64" ]; then node-prune; fi
 
 ###############################################################
-FROM node:12-alpine
+FROM node:18-alpine
+
+# https://github.com/nodejs/docker-node/blob/main/docs/BestPractices.md#handling-kernel-signals
+RUN apk add --no-cache tini
 
 WORKDIR /usr/src/prism
 ARG BUILD_TYPE=development
@@ -68,4 +71,4 @@ fi
 
 EXPOSE 4010
 
-ENTRYPOINT [ "node", "dist/index.js" ]
+ENTRYPOINT [ "/sbin/tini", "--", "node", "dist/index.js" ]

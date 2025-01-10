@@ -3,6 +3,8 @@ import { validate } from '../headers';
 import * as validateAgainstSchemaModule from '../utils';
 import { assertRight, assertLeft } from '@stoplight/prism-core/src/__tests__/utils';
 import * as O from 'fp-ts/Option';
+import * as faker from '@faker-js/faker/locale/en';
+import { ValidationContext } from '../types';
 
 describe('validate()', () => {
   beforeEach(() => {
@@ -13,13 +15,19 @@ describe('validate()', () => {
     describe('header is not present', () => {
       describe('spec defines it as required', () => {
         it('returns validation error', () => {
-          assertLeft(validate({}, [{ name: 'aHeader', style: HttpParamStyles.Simple, required: true }]), error =>
-            expect(error).toContainEqual({
-              code: 'required',
-              message: "must have required property 'aheader'",
-              path: ['header'],
-              severity: 0,
-            })
+          assertLeft(
+            validate(
+              {},
+              [{ id: faker.random.word(), name: 'aHeader', style: HttpParamStyles.Simple, required: true }],
+              ValidationContext.Input
+            ),
+            error =>
+              expect(error).toContainEqual({
+                code: 'required',
+                message: "Request header must have required property 'aheader'",
+                path: ['header'],
+                severity: 0,
+              })
           );
         });
       });
@@ -31,13 +39,18 @@ describe('validate()', () => {
           describe('header is valid', () => {
             it('validates positively against schema', () => {
               assertRight(
-                validate({ 'x-test-header': 'abc' }, [
-                  {
-                    name: 'x-test-header',
-                    style: HttpParamStyles.Simple,
-                    schema: { type: 'string' },
-                  },
-                ])
+                validate(
+                  { 'x-test-header': 'abc' },
+                  [
+                    {
+                      id: faker.random.word(),
+                      name: 'x-test-header',
+                      style: HttpParamStyles.Simple,
+                      schema: { type: 'string' },
+                    },
+                  ],
+                  ValidationContext.Input
+                )
               );
 
               expect(validateAgainstSchemaModule.validateAgainstSchema).toReturnWith(O.none);
@@ -49,12 +62,17 @@ describe('validate()', () => {
       describe('schema was not provided', () => {
         it('omits schema validation', () => {
           assertRight(
-            validate({ 'x-test-header': 'abc' }, [
-              {
-                name: 'x-test-header',
-                style: HttpParamStyles.Simple,
-              },
-            ])
+            validate(
+              { 'x-test-header': 'abc' },
+              [
+                {
+                  id: faker.random.word(),
+                  name: 'x-test-header',
+                  style: HttpParamStyles.Simple,
+                },
+              ],
+              ValidationContext.Input
+            )
           );
 
           expect(validateAgainstSchemaModule.validateAgainstSchema).toReturnWith(O.none);
@@ -64,13 +82,18 @@ describe('validate()', () => {
       describe('deprecated flag is set', () => {
         it('returns deprecation warning', () => {
           assertLeft(
-            validate({ 'x-test-header': 'abc' }, [
-              {
-                name: 'x-test-header',
-                deprecated: true,
-                style: HttpParamStyles.Simple,
-              },
-            ]),
+            validate(
+              { 'x-test-header': 'abc' },
+              [
+                {
+                  id: faker.random.word(),
+                  name: 'x-test-header',
+                  deprecated: true,
+                  style: HttpParamStyles.Simple,
+                },
+              ],
+              ValidationContext.Input
+            ),
             error => expect(error).toContainEqual(expect.objectContaining({ severity: DiagnosticSeverity.Warning }))
           );
         });

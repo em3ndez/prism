@@ -12,11 +12,14 @@ import {
   IHttpPathParam,
   IHttpQueryParam,
 } from '@stoplight/types';
+import * as A from 'fp-ts/Array';
 import * as E from 'fp-ts/Either';
-import { sequenceSEither } from '../combinators';
+import * as O from 'fp-ts/Option';
+import * as ROA from 'fp-ts/ReadonlyArray';
 import { pipe } from 'fp-ts/function';
-import { identity, fromPairs } from 'lodash';
+import { fromPairs, identity } from 'lodash';
 import { URI } from 'uri-template-lite';
+import { sequenceSEither } from '../combinators';
 import { ValuesTransformer } from './colorizer';
 
 export function createExamplePath(
@@ -29,7 +32,8 @@ export function createExamplePath(
     E.bind('queryData', ({ pathData }) => generateTemplateAndValuesForQueryParams(pathData.template, operation)),
     E.map(({ pathData, queryData }) =>
       URI.expand(queryData.template, transformValues({ ...pathData.values, ...queryData.values }))
-    )
+    ),
+    E.map(path => path.replace(/\?$/, ''))
   );
 }
 
@@ -80,12 +84,16 @@ function generateParamValue(spec: IHttpParam): E.Either<Error, unknown> {
 function generateParamValues(specs: IHttpParam[]): E.Either<Error, Dictionary<unknown>> {
   return pipe(
     specs,
+    A.map(O.fromNullable),
+    A.compact,
     E.traverseArray(spec =>
       pipe(
         generateParamValue(spec),
-        E.map(value => [encodeURI(spec.name), value])
+        E.map(value => [encodeURI(spec.name), value]),
+        E.map(O.fromPredicate(([_, value]) => value !== null))
       )
     ),
+    E.map(ROA.compact),
     E.map(fromPairs)
   );
 }
@@ -140,11 +148,16 @@ function createParamUriTemplate(name: string, style: HttpParamStyles, explode: b
 }
 
 function createQueryUriTemplate(path: string, specs: IHttpQueryParam[]) {
-  // defaults for query: style=Form exploded=false
+  // defaults for query: style=Form
+  // when query is style == form, default exploded=false
   const formSpecs = specs
     .filter(spec => (spec.style || HttpParamStyles.Form) === HttpParamStyles.Form)
     .map(spec => {
       spec.name = encodeURI(spec.name);
+      // default explode for form style query params is true
+      if (spec.explode === undefined) {
+        spec.explode = true;
+      }
       return spec;
     });
 

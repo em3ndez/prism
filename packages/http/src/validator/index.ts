@@ -21,17 +21,19 @@ import { findOperationResponse } from './utils/spec';
 import { validateBody, validateHeaders, validatePath, validateQuery } from './validators';
 import { NonEmptyArray } from 'fp-ts/NonEmptyArray';
 import { ValidationContext } from './validators/types';
+import { parseMIMEHeader } from '../validator/validators/headers';
 import { wildcardMediaTypeMatch } from './utils/wildcardMediaTypeMatch';
 
 export { validateSecurity } from './validators/security';
 
-const checkBodyIsProvided = (requestBody: IHttpOperationRequestBody, body: unknown) =>
+const checkRequiredBodyIsProvided = (requestBody: O.Option<IHttpOperationRequestBody>, body: unknown) =>
   pipe(
     requestBody,
-    E.fromPredicate<IHttpOperationRequestBody, NonEmptyArray<IPrismDiagnostic>>(
-      requestBody => !(!!requestBody.required && !body),
+    E.fromPredicate<O.Option<IHttpOperationRequestBody>, NonEmptyArray<IPrismDiagnostic>>(
+      requestBody => O.isNone(requestBody) || !(!!requestBody.value.required && !body),
       () => [{ code: 'required', message: 'Body parameter is required', severity: DiagnosticSeverity.Error }]
-    )
+    ),
+    E.map(requestBody => [requestBody, O.fromNullable(body)] as const)
   );
 
 const isMediaTypeSupportedInContents = (mediaType?: string, contents?: IMediaTypeContent[]): boolean =>
@@ -51,64 +53,66 @@ const isMediaTypeSupportedInContents = (mediaType?: string, contents?: IMediaTyp
   );
 
 const validateInputIfBodySpecIsProvided = (
-  body: unknown,
-  mediaType: string,
-  contents?: IMediaTypeContent[],
+  body: O.Option<unknown>,
+  requestBody: O.Option<IHttpOperationRequestBody>,
+  mediaType?: string,
+  multipartBoundary?: string,
   bundle?: unknown
 ) =>
   pipe(
-    sequenceOption(O.fromNullable(body), O.fromNullable(contents)),
+    sequenceOption(body, requestBody),
     O.fold(
       () => E.right(body),
-      ([body, contents]) => validateBody(body, contents, ValidationContext.Input, mediaType, bundle)
+      ([body, contents]) =>
+        validateBody(body, contents.contents ?? [], ValidationContext.Input, mediaType, multipartBoundary, bundle)
     )
   );
 
-const tryValidateInputBody = (
-  requestBody: IHttpOperationRequestBody,
+const validateInputBody = (
+  requestBody: O.Option<IHttpOperationRequestBody>,
   bundle: unknown,
   body: unknown,
   headers: IHttpNameValue
 ) =>
   pipe(
-    checkBodyIsProvided(requestBody, body),
-    E.chain(() => {
-      const headersNormalized = caseless(headers || {});
+    checkRequiredBodyIsProvided(requestBody, body),
+    E.map(b => [...b, caseless(headers || {})] as const),
+    E.chain(([requestBody, body, headers]) => {
+      const contentTypeHeader = headers.get('content-type');
+      const [multipartBoundary, mediaType] = contentTypeHeader
+        ? parseMIMEHeader(contentTypeHeader)
+        : [undefined, undefined];
 
-      const contentLength = parseInt(headersNormalized.get('content-length')) || 0;
+      const contentLength = parseInt(headers.get('content-length')) || 0;
       if (contentLength === 0) {
         // generously allow this content type if there isn't a body actually provided
-        return E.right(body);
+        return E.right([requestBody, body, mediaType, multipartBoundary] as const);
       }
 
-      const mediaType = headersNormalized.get('content-type');
-      if (isMediaTypeSupportedInContents(mediaType, requestBody.contents)) {
-        return E.right(body);
-      }
+      let errorMessage = 'No supported content types, but request included a non-empty body';
+      if (O.isSome(requestBody)) {
+        if (isMediaTypeSupportedInContents(mediaType, requestBody.value.contents)) {
+          return E.right([requestBody, body, mediaType, multipartBoundary] as const);
+        }
 
-      const specRequestBodyContents = requestBody.contents || [];
-      let message: string;
-
-      if (specRequestBodyContents.length === 0) {
-        message = 'No supported content types, but request included a non-empty body';
-      } else {
-        const supportedContentTypes = specRequestBodyContents.map(x => x.mediaType);
-        message = `Supported content types: ${supportedContentTypes.join(',')}`;
+        const specRequestBodyContents = requestBody.value.contents || [];
+        if (specRequestBodyContents.length > 0) {
+          const supportedContentTypes = specRequestBodyContents.map(x => x.mediaType);
+          errorMessage = `Supported content types: ${supportedContentTypes.join(',')}`;
+        }
       }
 
       return E.left<NonEmptyArray<IPrismDiagnostic>>([
         {
-          message,
+          message: errorMessage,
           code: 415,
           severity: DiagnosticSeverity.Error,
         },
       ]);
     }),
-    E.chain(() => {
-      const mediaType = caseless(headers || {}).get('content-type');
-
-      return validateInputIfBodySpecIsProvided(body, mediaType, requestBody.contents, bundle);
-    })
+    E.chain(([requestBody, body, mediaType, multipartBoundary]) =>
+      validateInputIfBodySpecIsProvided(body, requestBody, mediaType, multipartBoundary, bundle)
+    )
   );
 
 export const validateInput: ValidatorFn<IHttpOperation, IHttpRequest> = ({ resource, element }) => {
@@ -122,11 +126,20 @@ export const validateInput: ValidatorFn<IHttpOperation, IHttpRequest> = ({ resou
       e => E.right<NonEmptyArray<IPrismDiagnostic>, unknown>(e),
       request =>
         sequenceValidation(
-          request.body ? tryValidateInputBody(request.body, bundle, body, element.headers || {}) : E.right(undefined),
-          request.headers ? validateHeaders(element.headers || {}, request.headers, bundle) : E.right(undefined),
-          request.query ? validateQuery(element.url.query || {}, request.query, bundle) : E.right(undefined),
+          validateInputBody(O.fromNullable(request.body), bundle, body, element.headers || {}),
+          request.headers
+            ? validateHeaders(element.headers || {}, request.headers, ValidationContext.Input, bundle)
+            : E.right(undefined),
+          request.query
+            ? validateQuery(element.url.query || {}, request.query, ValidationContext.Input, bundle)
+            : E.right(undefined),
           request.path
-            ? validatePath(getPathParams(element.url.path, resource.path), request.path, bundle)
+            ? validatePath(
+                getPathParams(element.url.path, resource.path),
+                request.path,
+                ValidationContext.Input,
+                bundle
+              )
             : E.right(undefined)
         )
     ),
@@ -186,8 +199,8 @@ export const validateOutput: ValidatorFn<IHttpOperation, IHttpResponse> = ({ res
             contents => validateMediaType(contents, mediaType)
           )
         ),
-        validateBody(element.body, response.contents || [], ValidationContext.Output, mediaType, bundle),
-        validateHeaders(element.headers || {}, response.headers || [], bundle)
+        validateBody(element.body, response.contents || [], ValidationContext.Output, mediaType, undefined, bundle),
+        validateHeaders(element.headers || {}, response.headers || [], ValidationContext.Output, bundle)
       )
     ),
     E.map(() => element)

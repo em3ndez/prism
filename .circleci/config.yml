@@ -2,18 +2,15 @@ version: 2.1
 executors:
   docker-node:
     docker:
-      - image: circleci/node:12
+      - image: cimg/node:18.20
   docker-harness:
     docker:
-      - image: circleci/node:12
+      - image: cimg/node:18.20
       - image: kennethreitz/httpbin
         name: httpbin.org
   macos:
     macos:
-      xcode: 12.5.1
-
-orbs:
-  stoplight: stoplight/cli@0.0.3
+      xcode: 13.4.1
 jobs:
   build:
     executor: docker-node
@@ -52,10 +49,11 @@ jobs:
       - when:
           condition: <<parameters.install_manually>>
           steps:
+            - run: nvm install 18.20.1 && nvm alias default 18.20.1
             - run: pip3 install pipenv gunicorn
             - run: sudo bash -c 'echo "0.0.0.0 httpbin.org" >> /etc/hosts'
             - run: git clone https://github.com/stoplightio/httpbin httpbin
-            - run: cd httpbin && pip3 install --no-cache-dir -r <(pipenv lock -r) && pip3 install --no-cache-dir ./
+            - run: cd httpbin && pip3 install --no-cache-dir -r <(pipenv requirements) && pip3 install --no-cache-dir ./
             - run:
                 command: cd httpbin && gunicorn -b 0.0.0.0:80 httpbin:app -k gevent
                 background: true
@@ -85,7 +83,7 @@ jobs:
       - run: echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
       - run:
           name: Publish
-          command: yarn lerna publish from-git --create-release=github --yes --no-verify-access
+          command: yarn lerna publish from-git --create-release=github --yes
       - run:
           name: Create CLI binaries
           command: npx pkg --out-path ./cli-binaries ./packages/cli/
@@ -97,13 +95,13 @@ jobs:
             - cli-binaries
   upload_artifacts:
     docker:
-      - image: circleci/golang:1-stretch
+      - image: cimg/go:1.23
     steps:
       - attach_workspace:
           at: /tmp/
       - run:
           name: 'Download GitHub Release Utility'
-          command: go get github.com/tcnksm/ghr
+          command: go install github.com/tcnksm/ghr@latest
       - run:
           name: 'Publish Release artifacts on GitHub'
           command: ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -r ${CIRCLE_PROJECT_REPONAME} -c ${CIRCLE_SHA1} ${CIRCLE_TAG} /tmp/cli-binaries
@@ -148,11 +146,3 @@ workflows:
               only: /^v.*/
           requires:
             - publish
-      - stoplight/analyze:
-          filters:
-            branches:
-              ignore: /.*/
-            tags:
-              only: /^v.*/
-          requires:
-            - upload_artifacts

@@ -1,8 +1,9 @@
 import { HttpParamStyles, IMediaTypeContent } from '@stoplight/types';
 import { JSONSchema } from '../../..';
-import { validate, findContentByMediaTypeOrFirst } from '../body';
+import { validate, findContentByMediaTypeOrFirst, decodeUriEntities } from '../body';
 import { assertRight, assertLeft, assertSome } from '@stoplight/prism-core/src/__tests__/utils';
 import { ValidationContext } from '../types';
+import * as faker from '@faker-js/faker/locale/en';
 
 describe('validate()', () => {
   describe('content specs are missing', () => {
@@ -16,7 +17,7 @@ describe('validate()', () => {
       assertRight(
         validate(
           'test',
-          [{ mediaType: 'application/not-exists-son', examples: [], encodings: [] }],
+          [{ id: faker.random.word(), mediaType: 'application/not-exists-son', examples: [], encodings: [] }],
           ValidationContext.Input
         )
       );
@@ -28,7 +29,7 @@ describe('validate()', () => {
       assertRight(
         validate(
           'test',
-          [{ mediaType: 'application/not-exists-son', examples: [], encodings: [] }],
+          [{ id: faker.random.word(), mediaType: 'application/not-exists-son', examples: [], encodings: [] }],
           ValidationContext.Input,
           'application/json'
         )
@@ -42,11 +43,14 @@ describe('validate()', () => {
       assertLeft(
         validate(
           'test',
-          [{ mediaType: 'application/json', schema: mockSchema, examples: [], encodings: [] }],
+          [{ id: faker.random.word(), mediaType: 'application/json', schema: mockSchema, examples: [], encodings: [] }],
           ValidationContext.Input,
           'application/json'
         ),
-        error => expect(error).toContainEqual(expect.objectContaining({ code: 'type', message: 'must be number' }))
+        error =>
+          expect(error).toContainEqual(
+            expect.objectContaining({ code: 'type', message: 'Request body must be number' })
+          )
       );
     });
   });
@@ -58,6 +62,7 @@ describe('validate()', () => {
           encodeURI('key[a]=str'),
           [
             {
+              id: faker.random.word(),
               mediaType: 'application/x-www-form-urlencoded',
               encodings: [{ property: 'key', style: HttpParamStyles.DeepObject }],
               schema: {
@@ -87,6 +92,7 @@ describe('validate()', () => {
           encodeURI('key[a][ab]=str'),
           [
             {
+              id: faker.random.word(),
               mediaType: 'application/x-www-form-urlencoded',
               encodings: [{ property: 'key', style: HttpParamStyles.DeepObject }],
               schema: {
@@ -115,7 +121,7 @@ describe('validate()', () => {
           expect(error).toContainEqual(
             expect.objectContaining({
               code: 'required',
-              message: "must have required property 'aa'",
+              message: "Request body property key.a must have required property 'aa'",
             })
           )
       );
@@ -125,6 +131,7 @@ describe('validate()', () => {
   describe('readOnly writeOnly parameters', () => {
     const specs: IMediaTypeContent[] = [
       {
+        id: faker.random.word(),
         mediaType: 'application/json',
         schema: {
           type: 'object',
@@ -147,7 +154,7 @@ describe('validate()', () => {
     ];
     it('requires writeOnly params from input', () => {
       assertLeft(validate({ name: 'Item One' }, specs, ValidationContext.Input, 'application/json'), error => {
-        expect(error[0].message).toEqual("must have required property 'description'");
+        expect(error[0].message).toEqual("Request body must have required property 'description'");
       });
     });
     it('succeed when writeOnly params are provided', () => {
@@ -162,7 +169,7 @@ describe('validate()', () => {
     });
     it('requires readOnly params from output', () => {
       assertLeft(validate({ name: 'Item One' }, specs, ValidationContext.Output, 'application/json'), error => {
-        expect(error[0].message).toEqual("must have required property 'title'");
+        expect(error[0].message).toEqual("Response body must have required property 'title'");
       });
     });
     it('succeed when readOnly params are provided', () => {
@@ -175,6 +182,7 @@ describe('validate()', () => {
       // Arrange
       const schemas: IMediaTypeContent[] = [
         {
+          id: faker.random.word(),
           mediaType: 'application/json',
           schema: {
             type: 'object',
@@ -204,6 +212,7 @@ describe('validate()', () => {
       // Arrange
       const schemas: IMediaTypeContent[] = [
         {
+          id: faker.random.word(),
           mediaType: 'application/json',
           schema: {
             type: 'object',
@@ -230,6 +239,7 @@ describe('validate()', () => {
       // Arrange
       const schemas: IMediaTypeContent[] = [
         {
+          id: faker.random.word(),
           mediaType: 'application/json',
           schema: {
             type: 'object',
@@ -258,6 +268,7 @@ describe('validate()', () => {
 describe('findContentByMediaTypeOrFirst()', () => {
   describe('when a spec has a content type', () => {
     const content: IMediaTypeContent = {
+      id: faker.random.word(),
       mediaType: 'application/x-www-form-urlencoded',
     };
 
@@ -266,5 +277,22 @@ describe('findContentByMediaTypeOrFirst()', () => {
 
       it('should return the generic content', () => assertSome(foundContent));
     });
+  });
+});
+
+describe('decodeUriEntities', () => {
+  it('should decode both key and value', () => {
+    const target = { 'profile%2DImage': 'outer%20space' };
+    const results = decodeUriEntities(target, 'application/x-www-form-urlencoded');
+    expect(results).toEqual({ 'profile-Image': 'outer space' });
+  });
+
+  it('should decode the key but leave the value as encoded if decoding fails', () => {
+    const target = {
+      'profile%2DImage':
+        '�PNG\r\n\u001a\n\u0000\u0000\u0000\rIHDR\u0000\u0000\u0000\u0001\u0000\u0000\u0000\u0001\u0001\u0003\u0000\u0000\u0000%�V�\u0000\u0000\u0000\u0003PLTE\u0000\u0000\u0000�z=�\u0000\u0000\u0000\u0001tRNS\u0000@��f\u0000\u0000\u0000\nIDAT\b�c`\u0000\u0000\u0000\u0002\u0000\u0001�!�3\u0000\u0000\u0000\u0000IEND�B`�',
+    };
+    const results = decodeUriEntities(target, 'application/x-www-form-urlencoded');
+    expect(results).toEqual({ 'profile-Image': target['profile%2DImage'] });
   });
 });

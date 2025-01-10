@@ -5,23 +5,27 @@ import * as chalk from 'chalk';
 import * as cluster from 'cluster';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { LogDescriptor, Logger, LoggerOptions } from 'pino';
+import * as pino from 'pino';
 import * as signale from 'signale';
 import * as split from 'split2';
 import { PassThrough, Readable } from 'stream';
 import { LOG_COLOR_MAP } from '../const/options';
+import { CreatePrism } from './runner';
+import { getHttpOperationsFromSpec } from '@stoplight/prism-http';
 import { createExamplePath } from './paths';
 import { attachTagsToParamsValues, transformPathParamsValues } from './colorizer';
-import { CreatePrism } from './runner';
-import { getHttpOperationsFromSpec } from '../operations';
-import { configureExtensionsFromSpec } from '../extensions';
+import { configureExtensionsUserProvided } from '../extensions';
 
-type PrismLogDescriptor = LogDescriptor & { name: keyof typeof LOG_COLOR_MAP; offset?: number; input: IHttpRequest };
+type PrismLogDescriptor = pino.LogDescriptor & {
+  name: keyof typeof LOG_COLOR_MAP;
+  offset?: number;
+  input: IHttpRequest;
+};
 
 signale.config({ displayTimestamp: true });
 
-const cliSpecificLoggerOptions: LoggerOptions = {
-  customLevels: { start: 11 },
+const cliSpecificLoggerOptions: pino.LoggerOptions = {
+  customLevels: { start: pino.levels.values['info'] + 1 },
   level: 'start',
   formatters: {
     level: level => ({ level }),
@@ -42,7 +46,7 @@ const createMultiProcessPrism: CreatePrism = async options => {
 
     return;
   } else {
-    const logInstance = createLogger('CLI', cliSpecificLoggerOptions);
+    const logInstance = createLogger('CLI', { ...cliSpecificLoggerOptions, level: options.verboseLevel });
 
     return createPrismServerWithLogger(options, logInstance).catch((e: Error) => {
       logInstance.fatal(e.message);
@@ -56,7 +60,7 @@ const createSingleProcessPrism: CreatePrism = options => {
   signale.await({ prefix: chalk.bgWhiteBright.black('[CLI]'), message: 'Starting Prism…' });
 
   const logStream = new PassThrough();
-  const logInstance = createLogger('CLI', cliSpecificLoggerOptions, logStream);
+  const logInstance = createLogger('CLI', { ...cliSpecificLoggerOptions, level: options.verboseLevel }, logStream);
   pipeOutputToSignale(logStream);
 
   return createPrismServerWithLogger(options, logInstance).catch((e: Error) => {
@@ -65,26 +69,35 @@ const createSingleProcessPrism: CreatePrism = options => {
   });
 };
 
-async function createPrismServerWithLogger(options: CreateBaseServerOptions, logInstance: Logger) {
+async function createPrismServerWithLogger(options: CreateBaseServerOptions, logInstance: pino.Logger) {
   const operations = await getHttpOperationsFromSpec(options.document);
-  await configureExtensionsFromSpec(options.document);
+  const jsonSchemaFakerCliParams: { [option: string]: any } = {
+    ['fillProperties']: options.jsonSchemaFakerFillProperties,
+  };
+  await configureExtensionsUserProvided(options.document, jsonSchemaFakerCliParams);
 
   if (operations.length === 0) {
     throw new Error('No operations found in the current file.');
   }
 
   const validateRequest = isProxyServerOptions(options) ? options.validateRequest : true;
-  const shared: Omit<IHttpConfig, 'mock'> = {
+  const shared = {
     validateRequest,
     validateResponse: true,
     checkSecurity: true,
-    errors: false,
+    errors: options.errors,
     upstreamProxy: undefined,
+    mock: { dynamic: options.dynamic, ignoreExamples: options.ignoreExamples, seed: options.seed },
   };
 
   const config: IHttpConfig = isProxyServerOptions(options)
-    ? { ...shared, mock: false, upstream: options.upstream, errors: options.errors, upstreamProxy: options.upstreamProxy }
-    : { ...shared, mock: { dynamic: options.dynamic }, errors: options.errors };
+    ? {
+        ...shared,
+        isProxy: true,
+        upstream: options.upstream,
+        upstreamProxy: options.upstreamProxy,
+      }
+    : { ...shared, isProxy: false };
 
   const server = createHttpServer(operations, {
     cors: options.cors,
@@ -93,7 +106,6 @@ async function createPrismServerWithLogger(options: CreateBaseServerOptions, log
   });
 
   const address = await server.listen(options.port, options.host);
-
   operations.forEach(resource => {
     const path = pipe(
       createExamplePath(resource, attachTagsToParamsValues),
@@ -130,6 +142,9 @@ function isProxyServerOptions(options: CreateBaseServerOptions): options is Crea
   return 'upstream' in options;
 }
 
+/**
+ * @property {boolean} jsonSchemaFakerFillProperties - Used to override the default json-schema-faker extension value
+ */
 type CreateBaseServerOptions = {
   dynamic: boolean;
   cors: boolean;
@@ -138,10 +153,13 @@ type CreateBaseServerOptions = {
   document: string;
   multiprocess: boolean;
   errors: boolean;
+  verboseLevel: string;
+  ignoreExamples: boolean;
+  seed: string;
+  jsonSchemaFakerFillProperties: boolean;
 };
 
 export interface CreateProxyServerOptions extends CreateBaseServerOptions {
-  dynamic: false;
   upstream: URL;
   validateRequest: boolean;
   upstreamProxy: string | undefined;

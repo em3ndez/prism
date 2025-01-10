@@ -37,12 +37,36 @@ function addressInfoToString(addressInfo: AddressInfo | string | null) {
   return `http://${addressInfo.address}:${addressInfo.port}`;
 }
 
+type ValidationError = {
+  location: string[];
+  severity: string;
+  code: string | number | undefined;
+  message: string | undefined;
+};
+
+const MAX_SAFE_HEADER_LENGTH = 8 * 1024 - 100; // 8kb minus some
+function addViolationHeader(reply: ServerResponse, validationErrors: ValidationError[]) {
+  if (validationErrors.length === 0) {
+    return;
+  }
+
+  let value = JSON.stringify(validationErrors);
+  if (value.length > MAX_SAFE_HEADER_LENGTH) {
+    value = `Too many violations! ${value.substring(0, MAX_SAFE_HEADER_LENGTH)}`;
+  }
+
+  reply.setHeader('sl-violations', value);
+}
+
 function parseRequestBody(request: IncomingMessage) {
   // if no body provided then return null instead of empty string
   if (
-    request.headers['content-type'] === undefined &&
-    request.headers['transfer-encoding'] === undefined &&
-    (request.headers['content-length'] === '0' || request.headers['content-length'] === undefined)
+    // If the body size is null, it means the body itself is null so the promise can resolve with a null value
+    request.headers['content-length'] === '0' ||
+    // Per HTTP 1.1 - these 2 headers are the valid way to indicate that a body exists:
+    // > The presence of a message body in a request is signaled by a Content-Length or Transfer-Encoding header field.
+    // https://httpwg.org/specs/rfc9112.html#message.body
+    (request.headers['transfer-encoding'] === undefined && request.headers['content-length'] === undefined)
   ) {
     return Promise.resolve(null);
   }
@@ -80,13 +104,10 @@ export const createServer = (operations: IHttpOperation[], opts: IPrismHttpServe
 
     components.logger.info({ input }, 'Request received');
 
-    const requestConfig: E.Either<Error, IHttpConfig> =
-      config.mock === false
-        ? E.right(config)
-        : pipe(
-            getHttpConfigFromRequest(input),
-            E.map(operationSpecificConfig => ({ ...config, mock: merge(config.mock, operationSpecificConfig) }))
-          );
+    const requestConfig: E.Either<Error, IHttpConfig> = pipe(
+      getHttpConfigFromRequest(input),
+      E.map(operationSpecificConfig => ({ ...config, mock: merge(config.mock, operationSpecificConfig) }))
+    );
 
     pipe(
       TE.fromEither(requestConfig),
@@ -99,7 +120,7 @@ export const createServer = (operations: IHttpOperation[], opts: IPrismHttpServe
         const inputOutputValidationErrors = inputValidationErrors.concat(outputValidationErrors);
 
         if (inputOutputValidationErrors.length > 0) {
-          reply.setHeader('sl-violations', JSON.stringify(inputOutputValidationErrors));
+          addViolationHeader(reply, inputOutputValidationErrors);
 
           const errorViolations = outputValidationErrors.filter(
             v => v.severity === DiagnosticSeverity[DiagnosticSeverity.Error]

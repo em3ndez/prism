@@ -37,7 +37,7 @@ const proxyCommand: CommandModule = {
           string: true,
         },
       }),
-  handler: parsedArgs => {
+  handler: async parsedArgs => {
     parsedArgs.validateRequest = parsedArgs['validate-request'];
     const p: CreateProxyServerOptions = pick(
       parsedArgs as unknown as CreateProxyServerOptions,
@@ -50,11 +50,15 @@ const proxyCommand: CommandModule = {
       'upstream',
       'errors',
       'validateRequest',
-      'upstreamProxy'
+      'verboseLevel',
+      'ignoreExamples',
+      'seed',
+      'upstreamProxy',
+      'jsonSchemaFakerFillProperties'
     );
 
     const createPrism = p.multiprocess ? createMultiProcessPrism : createSingleProcessPrism;
-    return runPrismAndSetupWatcher(createPrism, p);
+    await runPrismAndSetupWatcher(createPrism, p);
   },
 };
 

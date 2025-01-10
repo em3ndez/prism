@@ -2,11 +2,14 @@ import type { IPrismHttpServer } from '@stoplight/prism-http-server/src/types';
 import * as chokidar from 'chokidar';
 import * as os from 'os';
 import { CreateMockServerOptions } from './createServer';
-import { getHttpOperationsFromSpec } from '../operations';
+import { getHttpOperationsFromSpec } from '@stoplight/prism-http';
 
 export type CreatePrism = (options: CreateMockServerOptions) => Promise<IPrismHttpServer | void>;
 
-export function runPrismAndSetupWatcher(createPrism: CreatePrism, options: CreateMockServerOptions) {
+export function runPrismAndSetupWatcher(
+  createPrism: CreatePrism,
+  options: CreateMockServerOptions
+): Promise<IPrismHttpServer | void> {
   return createPrism(options).then(possibleServer => {
     if (possibleServer) {
       let server: IPrismHttpServer = possibleServer;
@@ -52,7 +55,7 @@ export function runPrismAndSetupWatcher(createPrism: CreatePrism, options: Creat
           });
       });
 
-      return new Promise(resolve => watcher.once('ready', resolve));
+      return new Promise(resolve => watcher.once('ready', () => resolve(server)));
     }
   });
 }

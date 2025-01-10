@@ -1,4 +1,4 @@
-import { getHttpOperationsFromSpec } from '../../operations';
+import { getHttpOperationsFromSpec } from '../operations';
 
 describe('getHttpOperationsFromSpec()', () => {
   describe('ref resolving fails', () => {
@@ -48,6 +48,7 @@ describe('getHttpOperationsFromSpec()', () => {
             path: '/pet',
             responses: [
               {
+                id: expect.any(String),
                 code: '200',
                 contents: [],
                 description: 'test',

@@ -1,14 +1,18 @@
 import { get } from 'lodash';
 import { JSONSchema } from '../../../types';
-import { generate } from '../JSONSchema';
+import { generate, sortSchemaAlphabetically } from '../JSONSchema';
 import { assertRight, assertLeft } from '@stoplight/prism-core/src/__tests__/utils';
+import { IHttpOperation } from '@stoplight/types';
 
 describe('JSONSchema generator', () => {
   const ipRegExp = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/;
-  const emailRegExp = /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
+  const emailRegExp =
+    /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
   const uuidRegExp = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
 
   describe('generate()', () => {
+    const operation = {} as IHttpOperation;
+
     describe('when used with a schema with a simple string property', () => {
       const schema: JSONSchema = {
         type: 'object',
@@ -19,12 +23,34 @@ describe('JSONSchema generator', () => {
       };
 
       it('will have a string property not matching anything in particular', () => {
-        assertRight(generate({}, schema), instance => {
+        assertRight(generate(operation, {}, schema), instance => {
           expect(instance).toHaveProperty('name');
-          const name = get(instance, 'name');
+          const name = get(instance, 'name', '');
 
           expect(ipRegExp.test(name)).toBeFalsy();
           expect(emailRegExp.test(name)).toBeFalsy();
+        });
+      });
+
+      it('will have a deterministic dynamic response if the seed is set', () => {
+        const result1 = generate(operation, {}, schema, "test_seed");
+        const result2 = generate(operation, {}, schema, "test_seed");
+
+        assertRight(result1, instance1 => {
+          assertRight(result2, instance2 => {
+            expect(instance1).toEqual(instance2);
+          });
+        });
+      });
+
+      it('will have a nondeterministic dynamic response if the seed is not set', () => {
+        const result1 = generate(operation, {}, schema);
+        const result2 = generate(operation, {}, schema);
+
+        assertRight(result1, instance1 => {
+          assertRight(result2, instance2 => {
+            expect(instance1).not.toEqual(instance2);
+          });
         });
       });
     });
@@ -39,9 +65,9 @@ describe('JSONSchema generator', () => {
       };
 
       it('will have a string property matching the email regex', () => {
-        assertRight(generate({}, schema), instance => {
+        assertRight(generate(operation, {}, schema), instance => {
           expect(instance).toHaveProperty('email');
-          const email = get(instance, 'email');
+          const email = get(instance, 'email', '');
 
           expect(ipRegExp.test(email)).toBeFalsy();
           expect(emailRegExp.test(email)).toBeTruthy();
@@ -59,15 +85,15 @@ describe('JSONSchema generator', () => {
       };
 
       it('will have a string property matching uuid regex', () => {
-        assertRight(generate({}, schema), instance => {
+        assertRight(generate(operation, {}, schema), instance => {
           const id = get(instance, 'id');
           expect(id).toMatch(uuidRegExp);
         });
       });
 
       it('will not be presented in the form of UUID as a URN', () => {
-        assertRight(generate({}, schema), instance => {
-          const id = get(instance, 'id');
+        assertRight(generate(operation, {}, schema), instance => {
+          const id = get(instance, 'id', '');
           expect(uuidRegExp.test(id)).not.toContainEqual('urn:uuid');
         });
       });
@@ -83,9 +109,9 @@ describe('JSONSchema generator', () => {
       };
 
       it('will have a string property matching the ip regex', () => {
-        assertRight(generate({}, schema), instance => {
+        assertRight(generate(operation, {}, schema), instance => {
           expect(instance).toHaveProperty('ip');
-          const ip = get(instance, 'ip');
+          const ip = get(instance, 'ip', '');
 
           expect(ipRegExp.test(ip)).toBeTruthy();
           expect(emailRegExp.test(ip)).toBeFalsy();
@@ -101,7 +127,7 @@ describe('JSONSchema generator', () => {
             meaning: {
               type: 'number',
               'x-faker': {
-                'random.number': {
+                'datatype.number': {
                   min: 42,
                   max: 42,
                 },
@@ -111,7 +137,7 @@ describe('JSONSchema generator', () => {
           required: ['meaning'],
         };
 
-        assertRight(generate({}, schema), instance => {
+        assertRight(generate(operation, {}, schema), instance => {
           expect(instance).toHaveProperty('meaning');
           const actual = get(instance, 'meaning');
           expect(actual).toStrictEqual(42);
@@ -132,7 +158,7 @@ describe('JSONSchema generator', () => {
           required: ['slug'],
         };
 
-        assertRight(generate({}, schema), instance => {
+        assertRight(generate(operation, {}, schema), instance => {
           expect(instance).toHaveProperty('slug');
           const actual = get(instance, 'slug');
           expect(actual).toStrictEqual('two-words');
@@ -150,7 +176,7 @@ describe('JSONSchema generator', () => {
         },
       };
 
-      it('will return a left', () => assertLeft(generate({}, schema)));
+      it('will return a left', () => assertLeft(generate(operation, {}, schema)));
     });
 
     describe('when writeOnly properties are provided', () => {
@@ -161,10 +187,11 @@ describe('JSONSchema generator', () => {
           title: { type: 'string', writeOnly: true },
         },
         required: ['id', 'title'],
+        additionalProperties: false,
       };
 
       it('removes writeOnly properties', () => {
-        assertRight(generate({}, schema), instance => {
+        assertRight(generate(operation, {}, schema), instance => {
           expect(instance).toEqual({
             id: expect.any(String),
           });
@@ -183,7 +210,57 @@ describe('JSONSchema generator', () => {
 
       Object.defineProperty(schema.properties, 'name', { writable: false });
 
-      return expect(generate({}, schema)).toBeTruthy();
+      return expect(generate(operation, {}, schema)).toBeTruthy();
+    });
+  });
+
+  describe('sortSchemaAlphabetically()', () => {
+    it('should handle nulls', () => {
+      const source = null;
+      expect(sortSchemaAlphabetically(source)).toEqual(null);
+    });
+
+    it('should leave source untouched if not array or object', () => {
+      const source = 'string';
+
+      expect(sortSchemaAlphabetically(source)).toEqual('string');
+    });
+
+    it('should leave source untouched if array of non-objects', () => {
+      const source = ['string'];
+
+      expect(sortSchemaAlphabetically(source)).toEqual(['string']);
+    });
+
+    it('should alphabetize properties of objects in array', () => {
+      const source = ['string', { d: 'd value', a: 'a value', b: 'b value', c: 'c value' }];
+
+      expect(sortSchemaAlphabetically(source)).toEqual([
+        'string',
+        { a: 'a value', b: 'b value', c: 'c value', d: 'd value' },
+      ]);
+    });
+
+    it('should alphabetize properties of object', () => {
+      const source = { d: 'd value', a: 'a value', b: 'b value', c: 'c value' };
+
+      expect(sortSchemaAlphabetically(source)).toEqual({ a: 'a value', b: 'b value', c: 'c value', d: 'd value' });
+    });
+
+    it('should alphabetize properties of nested objects', () => {
+      const source = {
+        d: { d3: 'd3 value', d1: 'd1 value', d4: 'd4 value', d2: 'd2 value' },
+        a: 'a value',
+        b: { b2: 'b2 value', b1: 'b1 value', b3: 'b3 value' },
+        c: 'c value',
+      };
+
+      expect(sortSchemaAlphabetically(source)).toEqual({
+        a: 'a value',
+        b: { b1: 'b1 value', b2: 'b2 value', b3: 'b3 value' },
+        c: 'c value',
+        d: { d1: 'd1 value', d2: 'd2 value', d3: 'd3 value', d4: 'd4 value' },
+      });
     });
   });
 });

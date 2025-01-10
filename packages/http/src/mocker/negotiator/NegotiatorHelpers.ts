@@ -12,12 +12,12 @@ import withLogger from '../../withLogger';
 import { NOT_ACCEPTABLE, NOT_FOUND, NO_RESPONSE_DEFINED } from '../errors';
 import {
   contentHasExamples,
-  createResponseFromDefault,
+  findDefaultResponse,
   findFirstExample,
   findBestHttpContentByMediaType,
   findDefaultContentType,
   findExampleByKey,
-  findLowest2xx,
+  findLowest2XXResponse,
   findResponseByStatusCode,
   findFirstResponse,
   IWithExampleMediaContent,
@@ -47,24 +47,25 @@ type BodyNegotiationResult = Omit<IHttpNegotiationResult, 'headers'>;
 const helpers = {
   negotiateByPartialOptionsAndHttpContent(
     { code, exampleKey, dynamic }: NegotiatePartialOptions,
-    httpContent: IMediaTypeContent
+    httpContent: IMediaTypeContent,
+    logger: Logger
   ): E.Either<Error, BodyNegotiationResult> {
-    const { mediaType } = httpContent;
-
+    const { mediaType, schema } = httpContent;
     if (exampleKey) {
       return pipe(
         findExampleByKey(httpContent, exampleKey),
-        E.fromOption(() =>
-          ProblemJsonError.fromTemplate(
+        E.fromOption(() => {
+          logger.warn(`Response for contentType: ${mediaType} and exampleKey: ${exampleKey} does not exist.`);
+          return ProblemJsonError.fromTemplate(
             NOT_FOUND,
             `Response for contentType: ${mediaType} and exampleKey: ${exampleKey} does not exist.`
-          )
-        ),
-        E.map(bodyExample => ({ code, mediaType, bodyExample }))
+          );
+        }),
+        E.map(bodyExample => ({ code, mediaType, bodyExample, schema }))
       );
     } else if (dynamic) {
       return pipe(
-        httpContent.schema,
+        schema,
         E.fromNullable(new Error(`Tried to force a dynamic response for: ${mediaType} but schema is not defined.`)),
         E.map(schema => ({ code, mediaType, schema }))
       );
@@ -72,14 +73,14 @@ const helpers = {
       return E.right(
         pipe(
           findFirstExample(httpContent),
-          O.map(bodyExample => ({ code, mediaType, bodyExample })),
+          O.map(bodyExample => ({ code, mediaType, bodyExample, schema })),
           O.alt(() =>
             pipe(
-              O.fromNullable(httpContent.schema),
+              O.fromNullable(schema),
               O.map<JSONSchema, BodyNegotiationResult>(schema => ({ schema, code, mediaType }))
             )
           ),
-          O.getOrElse<BodyNegotiationResult>(() => ({ code, mediaType }))
+          O.getOrElse<BodyNegotiationResult>(() => ({ code, mediaType, schema }))
         )
       );
     }
@@ -87,7 +88,8 @@ const helpers = {
 
   negotiateDefaultMediaType(
     partialOptions: NegotiatePartialOptions,
-    response: IHttpOperationResponse
+    response: IHttpOperationResponse,
+    logger: Logger
   ): E.Either<Error, IHttpNegotiationResult> {
     const { code, dynamic, exampleKey } = partialOptions;
     const { headers = [] } = response;
@@ -110,6 +112,7 @@ const helpers = {
             code,
             mediaType: 'text/plain',
             bodyExample: {
+              id: 'example',
               value: undefined,
               key: 'default',
             },
@@ -117,7 +120,7 @@ const helpers = {
           }),
         content =>
           pipe(
-            helpers.negotiateByPartialOptionsAndHttpContent({ code, dynamic, exampleKey }, content),
+            helpers.negotiateByPartialOptionsAndHttpContent({ code, dynamic, exampleKey }, content, logger),
             E.map(contentNegotiationResult => ({ headers, ...contentNegotiationResult }))
           )
       )
@@ -135,7 +138,6 @@ const helpers = {
     return logger => {
       if (requestMethod === 'head') {
         logger.info(`Responding with an empty body to a HEAD request.`);
-
         return E.right({ code: response.code, headers });
       }
 
@@ -151,7 +153,8 @@ const helpers = {
                 dynamic,
                 exampleKey,
               },
-              response
+              response,
+              logger
             );
           },
           mediaTypes =>
@@ -159,18 +162,27 @@ const helpers = {
               O.fromNullable(response.contents),
               O.chain(contents => findBestHttpContentByMediaType(contents, mediaTypes)),
               O.fold(
-                () =>
-                  pipe(
-                    createEmptyResponse(response.code, headers, mediaTypes),
-                    O.map(payloadlessResponse => {
-                      logger.info(`${outputNoContentFoundMessage(mediaTypes)}. Sending an empty response.`);
-                      return payloadlessResponse;
-                    }),
-                    E.fromOption<Error>(() => {
-                      logger.warn(outputNoContentFoundMessage(mediaTypes));
-                      return ProblemJsonError.fromTemplate(NOT_ACCEPTABLE, `Unable to find content for ${mediaTypes}`);
-                    })
-                  ),
+                () => {
+                  logger.warn(outputNoContentFoundMessage(mediaTypes));
+
+                  // the spec has a response body but does NOT have a media type defined for the one requested with the accept header (throw error)
+                  if (response.contents?.length && response.contents?.length > 0) {
+                    return pipe(
+                      createEmptyResponse(response.code, headers, mediaTypes),
+                      E.fromOption<Error>(() => {
+                        return ProblemJsonError.fromTemplate(
+                          NOT_ACCEPTABLE,
+                          `Unable to find content for ${mediaTypes}`
+                        );
+                      })
+                  )}
+
+                  // though accept header may have a request media type, the spec does not define a response body for the endpoint, so we essentially ignore the accept header (no error)
+                  return E.right<Error, IHttpNegotiationResult>({
+                    code: response.code,
+                    headers: headers,
+                  })
+                },
                 content => {
                   logger.success(`Found a compatible content for ${mediaTypes}`);
                   // a httpContent for a provided mediaType exists
@@ -181,7 +193,8 @@ const helpers = {
                         dynamic,
                         exampleKey,
                       },
-                      content
+                      content,
+                      logger
                     ),
                     E.map(contentNegotiationResult => ({
                       headers,
@@ -205,7 +218,8 @@ const helpers = {
     desiredOptions: NegotiationOptions
   ): RE.ReaderEither<Logger, Error, IHttpNegotiationResult> {
     return pipe(
-      findLowest2xx(httpOperation.responses),
+      findLowest2XXResponse(httpOperation.responses),
+      O.alt(() => findDefaultResponse(httpOperation.responses)),
       O.alt(() => findFirstResponse(httpOperation.responses)),
       RE.fromOption(() => ProblemJsonError.fromTemplate(NO_RESPONSE_DEFINED)),
       RE.chain(response => helpers.negotiateOptionsBySpecificResponse(httpOperation.method, desiredOptions, response))
@@ -224,7 +238,7 @@ const helpers = {
           findResponseByStatusCode(httpOperation.responses, code),
           O.alt(() => {
             logger.info(`Unable to find a ${code} response definition`);
-            return createResponseFromDefault(httpOperation.responses, code);
+            return findDefaultResponse(httpOperation.responses, code);
           })
         )
       ),
@@ -283,7 +297,7 @@ const helpers = {
         O.alt(() => {
           logger.debug(`Unable to find a ${tail(statusCodes)} response definition`);
           return pipe(
-            createResponseFromDefault(httpResponses, first),
+            findDefaultResponse(httpResponses, first),
             O.fold(
               () => {
                 logger.debug("Unable to find a 'default' response definition");
@@ -380,20 +394,21 @@ const helpers = {
 
     return pipe(
       helpers.findResponse(httpResponses, statusCodes),
-      R.chain(foundResponse => logger =>
-        pipe(
-          foundResponse,
-          E.fromOption(() => new Error('No 422, 400, or default responses defined')),
-          E.chain(response =>
-            pipe(
-              O.fromNullable(response.contents && response.contents.find(contentHasExamples)),
-              O.fold(
-                () => buildResponseBySchema(response, logger),
-                contentWithExamples => buildResponseByExamples(response, contentWithExamples, logger, exampleKey)
+      R.chain(
+        foundResponse => logger =>
+          pipe(
+            foundResponse,
+            E.fromOption(() => new Error('No 422, 400, or default responses defined')),
+            E.chain(response =>
+              pipe(
+                O.fromNullable(response.contents && response.contents.find(contentHasExamples)),
+                O.fold(
+                  () => buildResponseBySchema(response, logger),
+                  contentWithExamples => buildResponseByExamples(response, contentWithExamples, logger, exampleKey)
+                )
               )
             )
           )
-        )
       )
     );
   },
